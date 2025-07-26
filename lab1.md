@@ -181,8 +181,8 @@ seta20.2:
 
 | 步骤 | 操作                              | 说明                             |
 | ---- | --------------------------------- | -------------------------------- |
-| 1️⃣    | **关闭中断**：`cli`               | 避免中断在切换过程中发生         |
-| 2️⃣    | **开启 A20 地址线**（必要）       | 否则无法访问 1MB 以上内存        |
+| 1    | **关闭中断**：`cli`               | 避免中断在切换过程中发生         |
+| 2    | **开启 A20 地址线**（必要）       | 否则无法访问 1MB 以上内存        |
 | 3    | **构建 GDT 表**                   | 包含 null 描述符、代码段、数据段 |
 | 4    | **加载 GDTR**：`lgdt [gdtdesc]`   | 设置 GDT 寄存器                  |
 | 5    | **设置 CR0 的 PE 位**             | 设置 CR0[0] = 1，开启保护模式    |
@@ -211,5 +211,292 @@ ljmp $PROT_MODE_CSEG, $protcseg
 movl $0x0, %ebp
 movl $start, %esp
 call bootmain
+    
+
+# notes:
+# start为程序的起始地址（向上增长），可以作为栈顶指针（栈是从高地址向地址生张的）
+# push指令，是先减栈顶指针，再写入值
 ```
 
+# 四、函数调用
+
+- 函数调用前，参数需要手动push，且从右到左依次调用
+- 函数调用时，返回地址（**下一条执行指令的地址**）由call指令push到栈中
+- 函数返回前，需要清除局部变量栈空间**move ebp, esp**
+- 函数返回前，ret指令会pop栈，并且将pop得到的值（返回地址）进行跳转
+
+### 4.1、32位程序中，栈从高地址往低地址增长
+
+```
+高地址
+  ↑
+  |     参数1 ← [EBP + 8]
+  |     返回地址 ← [EBP + 4]
+  |     旧 EBP ← [EBP]
+  |     局部变量1 ← [EBP - 4]
+  |     局部变量2 ← [EBP - 8]
+  ↓
+低地址
+```
+
+### 4.2、典型函数调用过程中的变化
+
+```
+call foo
+
+foo:
+    push ebp            ; 保存上一层 ebp
+    mov esp, ebp        ; 建立新的栈帧，ebp 记录当前帧起点
+    sub esp, N          ; 为局部变量分配栈空间
+    ...
+    mov ebp, esp        ; 清除局部变量栈空间
+    pop ebp             ; 恢复上层 ebp
+    ret                 ; 返回，使用栈中的返回地址
+```
+
+# 五、bootloader
+
+### 5.1、ucore.img的组成
+
+```
+┌──────────────┬──────────────────────┬─────────────┐
+│ 第 0 扇区     │ 第 1 扇区起：kernel   │ 剩余填充     │
+│ bootblock     │ 内核代码             │ 全为 0       │
+│ (512 bytes)  │                      │             │
+└──────────────┴──────────────────────┴─────────────┘
+```
+
+### 5.2、生成ucore.img的Makefile
+
+```
+# create ucore.img
+UCOREIMG	:= $(call totarget,ucore.img)
+
+$(UCOREIMG): $(kernel) $(bootblock)
+	# 用0来填充10000个block（默认大小为512B）=5MB的空白镜像文件
+	$(V)dd if=/dev/zero of=$@ count=10000
+	# 用bootblock来写入ucore.img
+	$(V)dd if=$(bootblock) of=$@ conv=notrunc
+    # 用kernel来写入ucore.img的第一个扇区
+	$(V)dd if=$(kernel) of=$@ seek=1 conv=notrunc
+
+$(call create_target,ucore.img)
+# bootblock的大小不能超过512，因为kernel就是从第一个扇区开始写入的，会覆盖bootblock超过的部分
+```
+
+### 5.3、bootblock
+
+​	根据tools/sign.c代码可知，bootblock大小不能超过510个字节（不够的部分填充0），同时sign会在bootblock后面添加0x55,0xAA两个字节一起构成512个字节完整的bootloader.
+
+```
+BIOS 加电后会读取磁盘 第 0 扇区（LBA 0） 的 512 字节到内存的 0x7C00。
+
+这就是为什么 bootblock 必须恰好写到第一个扇区。
+
+这个扇区的最后两个字节必须是 0x55AA（MBR magic number），表示是一个可引导扇区。
+```
+
+### 5.4、kernel
+
+​	连接器ld使用32位ELF格式（elf_i386）和tools/kernel.dl链接脚本来生成kernel可执行程序
+
+# 六、特权级
+
+### 1、DPL、CPL、、RPL与IOPL
+
+- DPL存在段描述符中，规定访问改段的权限级别（Descriptor Privilege Level），每个段的DPL固定，当进程访问一个段时，需要进程特权级检查。
+- CPL存在于CS寄存器的低两位，即CPL是CS段描述符的DPL，是当前代码的权限级别（Current Privilege Level）
+- RPL存在段选择子中，说明的是进程对段访问的请求权限，是对于段选择子而言的，每个段选择子有自己的RPL。而且RPL对每个段来说不是固定的，两次访问同一段时的RPL可以不同。**RPL可能会削弱CPL的作用**，例如当前CPL=0的进程要访问一个数据段，它把段选择符中的RPL设为3，这样它对该段仍然只有特权为3的访问权限。
+- IOPL（I/O Privilege Level）即IO特权标志，位于eflag寄存器，用两位二进制位来表示，也称为I/O特权级字段。该字段指定了要求执行I/O指令的特权级。如果当前特权级别在数值上小于等于IOPL的值，那么，该I/O指令可执行，否则将发生一个保护异常。
+  - 只有当CPL=0时，可以改变IOPL的值，当CPL<=IOPL时，可以改变IF标志位（**中断使能标志**）。
+
+### 2、特权级检查
+
+- 访问段时，有效权限 **EPL = max(CPL, RPL)**，只有当`EPL ≤ DPL`才允许访问段，RPL会影响段访问权限
+- 访问门（调用门、陷阱门、中断门、任务门）时，**忽略RPL**，只考虑 CPL 和门的 DPL，当CPL ≤ DPL时，才能允许通过门切换。
+  - 通过门，能达到特权提升的目的。若是CPL=目标段DPL，直接跳转不需要特权切换，反之进行特权提升（**CPU自动完成CPL切换，栈切换（使用TSS）**）。
+
+### 3、通过中断切换特权级
+
+#### 3.1、TSS
+
+```c
+struct taskstate {
+    uint32_t ts_link;        // old ts selector
+    uintptr_t ts_esp0;        // stack pointers and segment selectors
+    uint16_t ts_ss0;        // after an increase in privilege level
+    uint16_t ts_padding1;
+    uintptr_t ts_esp1;
+    uint16_t ts_ss1;
+    uint16_t ts_padding2;
+    uintptr_t ts_esp2;
+    uint16_t ts_ss2;
+    uint16_t ts_padding3;
+    uintptr_t ts_cr3;        // page directory base
+    uintptr_t ts_eip;        // saved state from last task switch
+    uint32_t ts_eflags;
+    uint32_t ts_eax;        // more saved state (registers)
+    uint32_t ts_ecx;
+    uint32_t ts_edx;
+    uint32_t ts_ebx;
+    uintptr_t ts_esp;
+    uintptr_t ts_ebp;
+    uint32_t ts_esi;
+    uint32_t ts_edi;
+    uint16_t ts_es;            // even more saved state (segment selectors)
+    uint16_t ts_padding4;
+    uint16_t ts_cs;
+    uint16_t ts_padding5;
+    uint16_t ts_ss;
+    uint16_t ts_padding6;
+    uint16_t ts_ds;
+    uint16_t ts_padding7;
+    uint16_t ts_fs;
+    uint16_t ts_padding8;
+    uint16_t ts_gs;
+    uint16_t ts_padding9;
+    uint16_t ts_ldt;
+    uint16_t ts_padding10;
+    uint16_t ts_t;            // trap on task switch
+    uint16_t ts_iomb;        // i/o map base address
+};
+```
+
+- TSS分布保留了特权等级0，1，2的栈（ss，esp寄存器值）
+
+- TSS段的段描述符保存在GDT中，TR寄存器会保存TSS的段描述符，以提高索引速度
+
+  - ```c
+    static struct taskstate ts = {0};
+    #
+    static struct segdesc gdt[] = {
+        SEG_NULL,
+        [SEG_KTEXT] = SEG(STA_X | STA_R, 0x0, 0xFFFFFFFF, DPL_KERNEL),
+        [SEG_KDATA] = SEG(STA_W, 0x0, 0xFFFFFFFF, DPL_KERNEL),
+        [SEG_UTEXT] = SEG(STA_X | STA_R, 0x0, 0xFFFFFFFF, DPL_USER),
+        [SEG_UDATA] = SEG(STA_W, 0x0, 0xFFFFFFFF, DPL_USER),
+        [SEG_TSS]    = SEG_NULL,
+    };
+    
+    static struct pseudodesc gdt_pd = {
+        sizeof(gdt) - 1, (uint32_t)gdt
+    };
+    
+    #
+    /* gdt_init - initialize the default GDT and TSS */
+    static void
+    gdt_init(void) {
+        // Setup a TSS so that we can get the right stack when we trap from
+        // user to the kernel. But not safe here, it's only a temporary value,
+        // it will be set to KSTACKTOP in lab2.
+        // 设置TSS的ring0栈地址，包括esp寄存器和SS段寄存器
+        ts.ts_esp0 = (uint32_t)&stack0 + sizeof(stack0);
+        ts.ts_ss0 = KERNEL_DS;
+    
+        // initialize the TSS filed of the gdt
+         // 将TSS写入GDT中
+        gdt[SEG_TSS] = SEG16(STS_T32A, (uint32_t)&ts, sizeof(ts), DPL_KERNEL);
+        gdt[SEG_TSS].sd_s = 0;
+    
+        // reload all segment registers
+        // 加载GDT至GDTR寄存器
+        lgdt(&gdt_pd);
+    
+        // load the TSS
+        // 加载TSS至TR寄存器
+        ltr(GD_TSS);
+    }
+    ```
+
+#### 3.2、trapframe
+
+​	trajpframe结构是进入中断门所必须的结构，其结构如下	
+
+```C
+/* registers as pushed by pushal */
+struct pushregs {
+    uint32_t reg_edi;
+    uint32_t reg_esi;
+    uint32_t reg_ebp;
+    uint32_t reg_oesp;            /* Useless */
+    uint32_t reg_ebx;
+    uint32_t reg_edx;
+    uint32_t reg_ecx;
+    uint32_t reg_eax;
+};
+
+struct trapframe {
+    struct pushregs tf_regs;
+    uint16_t tf_gs;
+    uint16_t tf_padding0;
+    uint16_t tf_fs;
+    uint16_t tf_padding1;
+    uint16_t tf_es;
+    uint16_t tf_padding2;
+    uint16_t tf_ds;
+    uint16_t tf_padding3;
+    uint32_t tf_trapno;
+    /* below here defined by x86 hardware */
+    uint32_t tf_err;
+    uintptr_t tf_eip;
+    uint16_t tf_cs;
+    uint16_t tf_padding4;
+    uint32_t tf_eflags;
+    /* below here only when crossing rings, such as from user to kernel */
+    uintptr_t tf_esp;
+    uint16_t tf_ss;
+    uint16_t tf_padding5;
+} __attribute__((packed));
+```
+
+#### 3.3、中断处理例程的入口
+
+中断处理例程的入口代码用于**保存上下文并构建一个trapframe**，其源代码如下
+
+```assembly
+#include <memlayout.h>
+
+# vectors.S sends all traps here.
+.text
+.globl __alltraps
+__alltraps:
+    # push registers to build a trap frame
+    # therefore make the stack look like a struct trapframe
+    pushl %ds
+    pushl %es
+    pushl %fs
+    pushl %gs
+    pushal
+
+    # load GD_KDATA into %ds and %es to set up data segments for kernel
+    movl $GD_KDATA, %eax
+    movw %ax, %ds
+    movw %ax, %es
+
+    # push %esp to pass a pointer to the trapframe as an argument to trap()
+    pushl %esp
+
+    # call trap(tf), where tf=%esp
+    call trap
+
+    # pop the pushed stack pointer
+    popl %esp
+
+    # return falls through to trapret...
+.globl __trapret
+__trapret:
+    # restore registers from stack
+    popal
+
+    # restore %ds, %es, %fs and %gs
+    popl %gs
+    popl %fs
+    popl %es
+    popl %ds
+
+    # get rid of the trap number and error code
+    addl $0x8, %esp
+    iret
+```
+
+#### 3.4、切换特权级的过程
