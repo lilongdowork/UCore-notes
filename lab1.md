@@ -1,6 +1,6 @@
 # 一、寄存器
 
-### 1.1、控制寄存器
+### 1、控制寄存器
 
 | 寄存器     | 名称                     | 用途简介                                                     |
 | ---------- | ------------------------ | ------------------------------------------------------------ |
@@ -11,9 +11,7 @@
 | **CR8**    | 控制寄存器8（仅 x86_64） | 控制中断优先级（TLP，任务优先级级别）                        |
 | IP/EIP/RIP | 程序计数器 / 指令指针    | 指向下一条指向的指令（IP：16位实模式下，EIP：32位保护模式，RIP：64位） |
 
-
-
-#### 1.1.1、**CR0：核心控制器**
+#### 1.1、**CR0：核心控制器**
 
 `CR0` 是最重要的控制寄存器，包含多个位（bit flags），用于开启/关闭核心特性。
 
@@ -31,7 +29,7 @@
 | 18   | **AM** | Alignment Mask：对齐检查                    |
 | 31   | **PG** | Paging：是否开启分页机制                    |
 
-### 1.2、段寄存器
+### 2、段寄存器
 
 | 寄存器 | 名称                                 | 通常用途       |
 | ------ | ------------------------------------ | -------------- |
@@ -42,14 +40,14 @@
 | `FS`   | 通常是线程局部存储（TLS）等          |                |
 | `GS`   | 同上，也可用于 SMP 的 CPU 本地数据等 |                |
 
-#### 1.2.1、实模式与保护模式下，段寄存器的区别
+#### 2.1、实模式与保护模式下，段寄存器的区别
 
 | 模式         | 作用机制                                                     |
 | ------------ | ------------------------------------------------------------ |
 | **实模式**   | 段寄存器的值 × 16 + 偏移（`seg * 16 + offset`）构成 **物理地址** |
 | **保护模式** | 段寄存器存的是**段选择子**（selector），要通过 GDT/LDT 查找段描述符，计算出段基址和段限长等 |
 
-####  1.2.2、段选择子的格式（16 位）
+####  2.2、段选择子的格式（16 位）
 
 | 位段 | 含义                                                       |
 | ---- | ---------------------------------------------------------- |
@@ -57,7 +55,7 @@
 | 2    | TI：GDT (0) / LDT (1)                                      |
 | 3-15 | 段描述符索引（index），**占用13位（段描述符最大=8192-1）** |
 
-#### 1.2.3、GDT描述符
+#### 2.3、GDT描述符
 
 ```assembly
 gdtdesc:
@@ -69,7 +67,7 @@ gdtdesc:
 # lgdt gdtdesc 将 GDTR 设为 gdtdesc 指向的内容
 ```
 
-#### 1.2.4、段描述符
+#### 2.4、段描述符
 
 ```c
 * segment descriptors */
@@ -90,7 +88,7 @@ struct segdesc {
 };
 ```
 
-### 1.3、通用寄存器
+### 3、通用寄存器
 
 | 寄存器  | 用途常见缩写      | 常见用途说明                     |
 | ------- | ----------------- | -------------------------------- |
@@ -116,13 +114,13 @@ struct segdesc {
 | 指令集          | 基本是 8086 指令集                                           |
 | 可直接访问 BIOS | ✅ 支持调用 BIOS 中断（如 `int 0x10` 显示字符）               |
 
-### 2.1、什么是A20
+### 1、什么是A20
 
 ​	A20（Address Line 20）是x86架构中的一个概念，在早期的8086/8088处理器**没有第21根地址线（A20）**,所以x86实模式中，cpu使用20位地址总线来访问内存（最多1MB）。
 
 ​	到了 80286/80386 时代，CPU 实际可以访问超过 1MB 的内存，但为了兼容旧软件，**A20 线默认是关闭的**（高地址位被屏蔽）。
 
-### 2.2、如何开启A20
+### 2、如何开启A20
 
 - 通过键盘控制器（最传统，最兼容）
 
@@ -167,17 +165,17 @@ seta20.2:
 无
 ```
 
-### 2.3、实模式下地址计算
+### 3、实模式下地址计算
 
 ​	线性地址 = 段寄存器 x 16 + 偏移量 = (段寄存器 << 4) + offset
 
-### 2.4、实模式能访问的内存
+### 4、实模式能访问的内存
 
 ​	0xFFFF:0xFFFF = 0xFFFF << 4 + 0xFFFF = 0x10FFEF > 1MB，由于A20地址线默认关闭，高出部分会wrap around到0x00000。
 
 # 三、实模式切换保护模式
 
-### 3.1、实模式 → 保护模式 切换的步骤（标准流程）
+### 1、实模式 → 保护模式 切换的步骤（标准流程）
 
 | 步骤 | 操作                              | 说明                             |
 | ---- | --------------------------------- | -------------------------------- |
@@ -190,7 +188,7 @@ seta20.2:
 | 7    | **设置数据段寄存器（ds, ss 等）** | 切换到新段模型                   |
 | 8    | 可选：开启分页，加载 IDT 等       | 如进入分页保护模式时             |
 
-### 3.2、ljmp跳转刷新CS段
+### 2、ljmp跳转刷新CS段
 
 ```assembly
 # Jump to next instruction, but in 32-bit code segment.
@@ -204,7 +202,7 @@ ljmp $PROT_MODE_CSEG, $protcseg
 # 指令格式：ljmp $selector, $offset
 ```
 
-### 3.3、设置栈基址和栈顶寄存器(*)
+### 3、设置栈基址和栈顶寄存器(*)
 
 ```c
 # Set up the stack pointer and call into C. The stack region is from 0--start(0x7c00)
@@ -225,7 +223,7 @@ call bootmain
 - 函数返回前，需要清除局部变量栈空间**move ebp, esp**
 - 函数返回前，ret指令会pop栈，并且将pop得到的值（返回地址）进行跳转
 
-### 4.1、32位程序中，栈从高地址往低地址增长
+### 1、32位程序中，栈从高地址往低地址增长
 
 ```
 高地址
@@ -239,7 +237,7 @@ call bootmain
 低地址
 ```
 
-### 4.2、典型函数调用过程中的变化
+### 2、典型函数调用过程中的变化
 
 ```
 call foo
@@ -256,7 +254,7 @@ foo:
 
 # 五、bootloader
 
-### 5.1、ucore.img的组成
+### 1、ucore.img的组成
 
 ```
 ┌──────────────┬──────────────────────┬─────────────┐
@@ -266,7 +264,7 @@ foo:
 └──────────────┴──────────────────────┴─────────────┘
 ```
 
-### 5.2、生成ucore.img的Makefile
+### 2、生成ucore.img的Makefile
 
 ```
 # create ucore.img
@@ -284,7 +282,7 @@ $(call create_target,ucore.img)
 # bootblock的大小不能超过512，因为kernel就是从第一个扇区开始写入的，会覆盖bootblock超过的部分
 ```
 
-### 5.3、bootblock
+### 3、bootblock
 
 ​	根据tools/sign.c代码可知，bootblock大小不能超过510个字节（不够的部分填充0），同时sign会在bootblock后面添加0x55,0xAA两个字节一起构成512个字节完整的bootloader.
 
@@ -296,7 +294,7 @@ BIOS 加电后会读取磁盘 第 0 扇区（LBA 0） 的 512 字节到内存的
 这个扇区的最后两个字节必须是 0x55AA（MBR magic number），表示是一个可引导扇区。
 ```
 
-### 5.4、kernel
+### 4、kernel
 
 ​	连接器ld使用32位ELF格式（elf_i386）和tools/kernel.dl链接脚本来生成kernel可执行程序
 
@@ -500,3 +498,142 @@ __trapret:
 ```
 
 #### 3.4、切换特权级的过程
+
+#### 3.4.1、特权级提升（*）
+
+#### 3.4.2、特权级降级（*）
+
+​	
+
+# 七、练习
+
+### 1、练习5  实现函数调用堆栈跟踪函数
+
+```C
+/*
++|  栈底方向    | 高位地址
+ |    ...       |
+ |    ...       |
+ |  参数3       |
+ |  参数2       |
+ |  参数1       |
+ |  返回地址     |
+ |  上一层[ebp]  | <-------- [ebp]
+ |  局部变量     |  低位地址
+*/
+void print_stackframe(void) {
+    // 读取当前栈帧的ebp和eip
+    uint32_t ebp = read_ebp();
+    uint32_t eip = read_eip();
+    for(uint32_t i = 0; ebp != 0 && i < STACKFRAME_DEPTH; i++)
+    {
+        // 读取
+        cprintf("ebp:0x%08x eip:0x%08x args:", ebp, eip);
+        uint32_t* args = (uint32_t*)ebp + 2 ;
+        for(uint32_t j = 0; j < 4; j++)
+            cprintf("0x%08x ", args[j]);
+        cprintf("\n");
+        // eip指向异常指令的下一条指令，所以要减1
+        print_debuginfo(eip-1);
+        // 将ebp 和eip设置为上一个栈帧的ebp和eip
+        //  注意要先设置eip后设置ebp，否则当ebp被修改后，eip就无法找到正确的位置
+        eip = *((uint32_t*)ebp + 1);
+        ebp = *(uint32_t*)ebp;
+    }
+}
+```
+
+### 2、练习6 完善中断初始化和处理
+
+```c
+void idt_init(void) {
+  // __vectors定义于vector.S中
+  extern uintptr_t __vectors[];
+  int i;
+  for (i = 0; i < sizeof(idt) / sizeof(struct gatedesc); i ++)
+      // 目标idt项为idt[i]
+      // 0中断门，1陷阱门
+      // 该idt项为内核代码，所以使用GD_KTEXT段选择子
+      // 中断处理程序的入口地址存放于__vectors[i]
+      // 特权级为DPL_KERNEL
+      SETGATE(idt[i], 0, GD_KTEXT, __vectors[i], DPL_KERNEL);
+  // 设置从用户态转为内核态的中断的特权级为DPL_USER
+  SETGATE(idt[T_SWITCH_TOK], 0, GD_KTEXT, __vectors[T_SWITCH_TOK], DPL_USER);
+  // 加载该IDT
+  lidt(&idt_pd);
+}
+```
+
+### 3、扩展练习1  用户态与内核态的相互转换
+
+#### 3.1、使用int中断的代码
+
+```c
+static void
+lab1_switch_to_user(void) {
+    asm volatile (
+        "int %0 \n"
+        :
+        : "i"(T_SWITCH_TOU)
+    );
+}
+
+static void
+lab1_switch_to_kernel(void) {
+    asm volatile (
+        "int %0 \n"
+        :
+        : "i"(T_SWITCH_TOK)
+    );
+}
+```
+
+#### 3.2、用户态转内核态
+
+```C
+struct trapframe switchu2k;
+#
+case T_SWITCH_TOK:
+    if (tf->tf_cs != KERNEL_CS) {
+        // 修改CPL DPL IOPL以提升特权级
+        tf->tf_cs = KERNEL_CS;
+        tf->tf_ds = tf->tf_es = KERNEL_DS;
+        tf->tf_eflags &= ~FL_IOPL_MASK;
+        // 计算将要保存新trapFrame的用户栈地址
+        //    数值减8是因为内核调用中断时CPU没有压入ss和esp
+        switchu2k = *(struct trapframe *)(tf->tf_esp - (sizeof(struct trapframe) - 8));
+        // 将修改后的trapFrame写入用户栈(注意当前是内核栈)。注意trapFrame中ss和esp的值不需要写入。
+        memmove(switchu2k, tf, sizeof(struct trapframe) - 8);
+        // 设置弹出esp的值为用户栈的新地址
+        *((uint32_t *)tf - 1) = (uint32_t)&switchu2k;
+    }
+    break;
+```
+
+#### 3.3、内核态转用户态
+
+```C
+struct trapframe switchk2u;
+#
+case T_SWITCH_TOU:
+    if (tf->tf_cs != USER_CS) {
+        // 将中断的栈帧赋给临时中断帧
+        switchk2u = *tf;
+        // 修改可执行代码段为USER_CS
+        switchk2u.tf_cs = USER_CS;
+        // 修改数据段为USER_DS
+        switchk2u.tf_ds = switchk2u.tf_es = switchk2u.tf_ss = USER_DS;
+        // 设置从中断处理程序返回时的栈地址
+        //    数值减8是因为iret不会弹出ss和esp，所以不需要这8个字节
+        switchk2u.tf_esp = (uint32_t)tf + sizeof(struct trapframe) - 8;
+        // 为了使得程序在低CPL的情况下仍然能够使用IO
+        // 需要将eflags中对应的IOPL位置成表示用户态的3
+        switchk2u.tf_eflags |= FL_IOPL_MASK;
+        // 设置中断处理例程结束时pop出的%esp，这样可以用修改后的数据来恢复上下文。
+        *((uint32_t *)tf - 1) = (uint32_t)&switchk2u;
+    }
+    // 事实上上述代码并没有实际完成一个从内核栈到用户态栈的切换
+    // 仅仅是完成了特权级的切换。这属于正常现象。
+    break;
+```
+
