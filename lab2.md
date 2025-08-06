@@ -214,6 +214,7 @@ __boot_pt1:
 .globl kern_entry
 kern_entry:
     # load pa of boot pgdir
+    # 分页前使用物理地址
     movl $REALLOC(__boot_pgdir), %eax
     movl %eax, %cr3
 
@@ -232,6 +233,7 @@ next:
 
     # unmap va 0 ~ 4M, it's temporary mapping
     xorl %eax, %eax
+    # 分页开启后，使用虚拟地址
     movl %eax, __boot_pgdir
 
     # set ebp, esp
@@ -264,5 +266,307 @@ next:
 
 #### 5.3、页目录项第一项谁使用了？
 
-# 六、uCore的内存空间布局（*）
+# 六、页框
+
+​	`struct Page` **对应的是“一个物理页框”的元数据结构体**，用于内核管理内存页。每一个实际的物理页框（通常大小为 4KB）在 uCore 中都会有一个对应的 `struct Page` 结构。如下为Page的结构
+
+```c
+struct Page {
+    int ref;                        // page frame's reference counter
+    uint32_t flags;                 // array of flags that describe the status of the page frame
+    unsigned int property;          // the num of free block, used in first fit pm manager
+    list_entry_t page_link;         // free list link
+};
+```
+
+​	这里的page_link为双向链表，不同与一般双向链表，链表中不包含data域，而是通过链表节点反推出包含它的结构体。如下
+
+```c
+// convert list entry to page
+#define le2page(le, member)                 \
+    to_struct((le), struct Page, member)
+    
+/* *
+ * to_struct - get the struct from a ptr
+ * @ptr:    a struct pointer of member
+ * @type:   the type of the struct this is embedded in
+ * @member: the name of the member within the struct
+ * */
+#define to_struct(ptr, type, member)                               \
+    ((type *)((char *)(ptr) - offsetof(type, member)))
+
+/* Return the offset of 'member' relative to the beginning of a struct type */
+#define offsetof(type, member)                                      \
+    ((size_t)(&((type *)0)->member))
+```
+
+### 1、初始化页框管理结构
+
+```c
+typedef struct {
+    list_entry_t free_list;         // the list header
+    unsigned int nr_free;           // # of free pages in this free list
+} free_area_t;
+
+#define free_list (free_area.free_list)
+#define nr_free (free_area.nr_free)
+
+static void
+default_init(void) {
+    list_init(&free_list);
+    nr_free = 0;
+}
+```
+
+### 2、初始化页框
+
+```c
+static void
+page_init(void) {
+    struct e820map *memmap = (struct e820map *)(0x8000 + KERNBASE);
+    uint64_t maxpa = 0;
+
+    cprintf("e820map:\n");
+    int i;
+    for (i = 0; i < memmap->nr_map; i ++) {
+        uint64_t begin = memmap->map[i].addr, end = begin + memmap->map[i].size;
+        cprintf("  memory: %08llx, [%08llx, %08llx], type = %d.\n",
+                memmap->map[i].size, begin, end - 1, memmap->map[i].type);
+        if (memmap->map[i].type == E820_ARM) {
+            if (maxpa < end && begin < KMEMSIZE) {
+                maxpa = end;
+            }
+        }
+    }
+    if (maxpa > KMEMSIZE) {
+        maxpa = KMEMSIZE;
+    }
+	// end定义在链接脚本kernel.ld中，表示内核映像结束地址
+    extern char end[];
+
+    npage = maxpa / PGSIZE;
+    // pages保存了所有的页框，为线性结构（虚拟地址>>12,即为对应的页框号）
+    pages = (struct Page *)ROUNDUP((void *)end, PGSIZE);
+	
+    // 先将内存[pages,maxpa)全部标记为不可用
+    for (i = 0; i < npage; i ++) {
+        SetPageReserved(pages + i);
+    }
+	
+    // 计算页框结构需要的内存，找到第一个可用的内存起始地址
+    uintptr_t freemem = PADDR((uintptr_t)pages + sizeof(struct Page) * npage);
+
+    for (i = 0; i < memmap->nr_map; i ++) {
+        uint64_t begin = memmap->map[i].addr, end = begin + memmap->map[i].size;
+        if (memmap->map[i].type == E820_ARM) {
+            if (begin < freemem) {
+                begin = freemem;
+            }
+            if (end > KMEMSIZE) {
+                end = KMEMSIZE;
+            }
+            if (begin < end) {
+                begin = ROUNDUP(begin, PGSIZE);
+                end = ROUNDDOWN(end, PGSIZE);
+                if (begin < end) {
+                    init_memmap(pa2page(begin), (end - begin) / PGSIZE);
+                }
+            }
+        }
+    }
+}
+
+static void
+default_init_memmap(struct Page *base, size_t n) {
+    assert(n > 0);
+    struct Page *p = base;
+    for (; p != base + n; p ++) {
+        assert(PageReserved(p));
+        // 清空标志位和property（原算法表示连续空闲页块的最大个数）
+        p->flags = p->property = 0;
+        // 清空引用
+        set_page_ref(p, 0);
+    }
+    base->property = n;
+    // 设置标志位，用来表示这个一个空闲页块的起始页
+    SetPageProperty(base);
+    nr_free += n;
+    // 给出的uCore这个实例中，是由一整块连续的空间构成的，所以说使用list_add_after，default_check也不会报错
+    list_add_before(&free_list, &(base->page_link));
+}
+```
+
+### 3、页框分配、释放（first-fit算法）
+
+```c
+static struct Page *
+default_alloc_pages(size_t n) {
+    assert(n > 0);
+    if (n > nr_free) {
+        return NULL;
+    }
+    struct Page *page = NULL;
+    list_entry_t *le = &free_list;
+    while ((le = list_next(le)) != &free_list) {
+        struct Page *p = le2page(le, page_link);
+        if (p->property >= n) {
+            page = p;
+            break;
+        }
+    }
+    if (page != NULL) {
+        if (page->property > n) {
+            struct Page *p = page + n;
+            p->property = page->property - n;
+            SetPageProperty(p);
+            // 后插
+            list_add_after(&&(page->page_link), &(p->page_link));
+        }
+        list_del(&(page->page_link));
+        nr_free -= n;
+        ClearPageProperty(page);
+    }
+    return page;
+}
+
+static void
+default_free_pages(struct Page *base, size_t n) {
+    assert(n > 0);
+    struct Page *p = base;
+    for (; p != base + n; p ++) {
+        assert(!PageReserved(p) && !PageProperty(p));
+        p->flags = 0;
+        set_page_ref(p, 0);
+    }
+    base->property = n;
+    SetPageProperty(base);
+    list_entry_t *le = &free_list;
+    while ((le = list_next(le)) != &free_list) {
+        p = le2page(le, page_link);
+        if (base + base->property == p) {
+            base->property += p->property;
+            ClearPageProperty(p);
+            list_del(&(p->page_link));
+        }
+        else if (p + p->property == base) {
+            p->property += base->property;
+            ClearPageProperty(base);
+            base = p;
+            list_del(&(p->page_link));
+        }
+    }
+    nr_free += n;
+    le = &free_list;
+    // 遍历free_list，找到合适的位置
+    while ((le = list_next(le)) != &free_list) {
+        p = le2page(le, page_link);
+        if (base + base->property <= p) {
+            assert(base + base->property != p);
+            break;
+        }
+    }
+    list_add_before(le, &(base->page_link));
+}
+```
+
+# 七、页框操作集
+
+```c
+//get_pte - get pte and return the kernel virtual address of this pte for la
+//        - if the PT contians this pte didn't exist, alloc a page for PT
+pte_t *
+get_pte(pde_t *pgdir, uintptr_t la, bool create) {
+	pde_t *pdep = &pgdir[PDX(la)];
+    if (!(*pdep & PTE_P)) {
+        struct Page *page;
+        if (!create || (page = alloc_page()) == NULL) {
+            return NULL;
+        }
+        set_page_ref(page, 1);
+        uintptr_t pa = page2pa(page);
+        memset(KADDR(pa), 0, PGSIZE);
+        *pdep = pa | PTE_U | PTE_W | PTE_P;
+    }
+    pte_t *pt = (pte_t*)KADDR(PDE_ADDR(*pdep));
+    return &pt[PTX(la)];
+}
+```
+
+```c
+//get_page - get related Page struct for linear address la using PDT pgdir
+struct Page *
+get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store) {
+    pte_t *ptep = get_pte(pgdir, la, 0);
+    if (ptep_store != NULL) {
+        *ptep_store = ptep;
+    }
+    if (ptep != NULL && *ptep & PTE_P) {
+        return pte2page(*ptep);
+    }
+    return NULL;
+}
+```
+
+```
+//page_remove_pte - free an Page sturct which is related linear address la
+//                - and clean(invalidate) pte which is related linear address la
+//note: PT is changed, so the TLB need to be invalidate 
+static inline void
+page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep) {    
+    if (*ptep & PTE_P) {
+        struct Page *page = pte2page(*ptep);
+        if (page_ref_dec(page) == 0) {
+            free_page(page);
+        }
+        *ptep = 0;
+        tlb_invalidate(pgdir, la);
+    }
+}
+```
+
+```c
+//page_remove - free an Page which is related linear address la and has an validated pte
+void
+page_remove(pde_t *pgdir, uintptr_t la) {
+    pte_t *ptep = get_pte(pgdir, la, 0);
+    if (ptep != NULL) {
+        page_remove_pte(pgdir, la, ptep);
+    }
+}
+```
+
+```c
+//page_insert - build the map of phy addr of an Page with the linear addr la
+// paramemters:
+//  pgdir: the kernel virtual base address of PDT
+//  page:  the Page which need to map
+//  la:    the linear address need to map
+//  perm:  the permission of this Page which is setted in related pte
+// return value: always 0
+//note: PT is changed, so the TLB need to be invalidate 
+int
+page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm) {
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL) {
+        return -E_NO_MEM;
+    }
+    page_ref_inc(page);
+    if (*ptep & PTE_P) {
+        struct Page *p = pte2page(*ptep);
+        if (p == page) {
+            page_ref_dec(page);
+        }
+        else {
+            page_remove_pte(pgdir, la, ptep);
+        }
+    }
+    *ptep = page2pa(page) | PTE_P | perm;
+    tlb_invalidate(pgdir, la);
+    return 0;
+}
+```
+
+
+
+# 八、uCore的内存空间布局（*）
 
