@@ -264,7 +264,7 @@ next:
 
 ​	而这一步的操作能否成功，关键就在于一级页表的设置。一级页表将虚拟内存中的两部分地址**KERNBASE+(0-4M)** 与 **(0-4M)** 暂时都映射至物理地址 **(0-4M)** 处，这样就可以满足上述的要求。
 
-#### 5.3、页目录项第一项谁使用了？
+#### 5.3、页目录项第0项谁使用了？
 
 # 六、页框
 
@@ -566,7 +566,68 @@ page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm) {
 }
 ```
 
+# 八、页目录自映射（?）
 
+```c
+// recursively insert boot_pgdir in itself
+// to form a virtual page table at virtual address VPT
+boot_pgdir[PDX(VPT)] = PADDR(boot_pgdir) | PTE_P | PTE_W;
+```
 
-# 八、uCore的内存空间布局（*）
+# 九、初始化页目录表和页表
+
+boot_pgdir中已经初始化了部分第768项（KERNBASE+4M），在entry.S中
+
+```c
+// map all physical memory to linear memory with base linear addr KERNBASE
+// linear_addr KERNBASE ~ KERNBASE + KMEMSIZE = phy_addr 0 ~ KMEMSIZE
+boot_map_segment(boot_pgdir, KERNBASE, KMEMSIZE, 0, PTE_W);
+
+static void
+boot_map_segment(pde_t *pgdir, uintptr_t la, size_t size, uintptr_t pa, uint32_t perm) {
+    assert(PGOFF(la) == PGOFF(pa));
+    size_t n = ROUNDUP(size + PGOFF(la), PGSIZE) / PGSIZE;
+    la = ROUNDDOWN(la, PGSIZE);
+    pa = ROUNDDOWN(pa, PGSIZE);
+    for (; n > 0; n --, la += PGSIZE, pa += PGSIZE) {
+        // get_pte中 给页目录项赋值
+        pte_t *ptep = get_pte(pgdir, la, 1);
+        assert(ptep != NULL);
+        // 页表项赋值
+        *ptep = pa | PTE_P | perm;
+    }
+}
+```
+
+# 十、初始化段描述符
+
+```c
+/* *
+ * load_esp0 - change the ESP0 in default task state segment,
+ * so that we can use different kernel stack when we trap frame
+ * user to kernel.
+ * */
+// 当 CPU 从用户态（CPL=3）进入内核态（CPL=0）时，会自动把内核栈指针 ESP 设为 ts.ts_esp0
+void
+load_esp0(uintptr_t esp0) {
+    ts.ts_esp0 = esp0;
+}
+
+/* gdt_init - initialize the default GDT and TSS */
+static void
+gdt_init(void) {
+    // set boot kernel stack and default SS0
+    load_esp0((uintptr_t)bootstacktop);
+    ts.ts_ss0 = KERNEL_DS;
+
+    // initialize the TSS filed of the gdt
+    gdt[SEG_TSS] = SEGTSS(STS_T32A, (uintptr_t)&ts, sizeof(ts), DPL_KERNEL);
+
+    // reload all segment registers
+    lgdt(&gdt_pd);
+
+    // load the TSS
+    ltr(GD_TSS);
+}
+```
 
