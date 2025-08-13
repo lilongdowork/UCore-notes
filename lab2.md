@@ -564,14 +564,31 @@ page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm) {
     tlb_invalidate(pgdir, la);
     return 0;
 }
+
+// notes:
+// page_insert是将虚拟地址指向指定的page,get_pte当pde不存在时
+// 会创建一个页表，同时指定权限PTE_U | PTE_W | PTE_P;
 ```
 
-# 八、页目录自映射（?）
+# 八、递归自映射（*？）
 
 ```c
 // recursively insert boot_pgdir in itself
 // to form a virtual page table at virtual address VPT
+
+#define PGADDR(d, t, o) ((uintptr_t)((d) << PDXSHIFT | (t) << PTXSHIFT | (o)))
+
+pte_t * const vpt = (pte_t *)VPT;
+pde_t * const vpd = (pde_t *)PGADDR(PDX(VPT), PDX(VPT), 0);
+
 boot_pgdir[PDX(VPT)] = PADDR(boot_pgdir) | PTE_P | PTE_W;
+
+
+// notes:
+// VPT映射了boot_pgdir（二维表大小1024*1024），此时boot_pgdir成为VPT对应的页表
+// vpt和vpd为两个数组，地址首地址都为VPT,
+// vpt[pd_index * 1024 + pt_index](vpt[1] = VPT + 1 * 4])和vpd[dp_index]，都会组成已VPT开始的地址，
+// 查表时，32位地址
 ```
 
 # 九、初始化页目录表和页表
