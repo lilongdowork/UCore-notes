@@ -279,9 +279,7 @@ proc_run(struct proc_struct *proc) {
 
 ### 7、switch_to（***）
 
-// switch_to保存进程的上下文，让不同的进程”轮流“占用CPU
-
-// 归根到底由idle_pro来执行每个进程的代码
+调用逻辑为switch_to(&(prev->context), &(next->context))，参考C调用函数逻辑，对参数和返回地址的处理
 
 ```assembly
 .text
@@ -290,6 +288,7 @@ switch_to:                      # switch_to(from, to)
 
     # save from's registers
     movl 4(%esp), %eax          # eax points to from
+    // 将返回地址出栈，赋值给from->eip
     popl 0(%eax)                # save eip !popl
     movl %esp, 4(%eax)          # save esp::context of from
     movl %ebx, 8(%eax)          # save ebx::context of from
@@ -300,6 +299,7 @@ switch_to:                      # switch_to(from, to)
     movl %ebp, 28(%eax)         # save ebp::context of from
 
     # restore to's registers
+    // eas指向to
     movl 4(%esp), %eax          # not 8(%esp): popped return address already
                                 # eax now points to to
     movl 28(%eax), %ebp         # restore ebp::context of to
@@ -309,7 +309,9 @@ switch_to:                      # switch_to(from, to)
     movl 12(%eax), %ecx         # restore ecx::context of to
     movl 8(%eax), %ebx          # restore ebx::context of to
     movl 4(%eax), %esp          # restore esp::context of to
-
+	
+	// 将to-eip放在栈顶（返回地址）
+	// eip指向forkret(在copy_thread时进行的处理)
     pushl 0(%eax)               # push eip
 
     ret
@@ -329,7 +331,11 @@ forkret(void) {
 }
 ```
 
-forkrets是干什么用的呢？从current->tf中恢复上下文，跳转至current->tf->tf_eip，也就是kernel_thread_entry
+forkrets是干什么用的呢？从current->tf中恢复上下文，跳转至current->tf->tf_eip，
+
+**如果是用户进程 fork 出来的子进程** → `iret` 跳到 `tf->eip = 父进程被中断时的 eip`（所以子进程像从 `fork()` 返回）。
+
+**如果是新建的内核线程** → `iret` 跳到 `tf->eip = kernel_thread_entry`，开始跑线程函数。
 
 ```assembly
 # return falls through to trapret...
@@ -346,6 +352,7 @@ __trapret:
 
     # get rid of the trap number and error code
     addl $0x8, %esp
+    // 此时eip为栈顶指针
     iret
 
 .globl forkrets
