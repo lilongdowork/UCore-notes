@@ -248,6 +248,7 @@ schedule(void) {
         }
         next->runs ++;
         if (next != current) {
+            /*****/
             proc_run(next);
         }
     }
@@ -270,6 +271,7 @@ proc_run(struct proc_struct *proc) {
             current = proc;
             load_esp0(next->kstack + KSTACKSIZE);
             lcr3(next->cr3);
+            /*****/
             switch_to(&(prev->context), &(next->context));
         }
         local_intr_restore(intr_flag);
@@ -287,7 +289,9 @@ proc_run(struct proc_struct *proc) {
 switch_to:                      # switch_to(from, to)
 
     # save from's registers
+    // 以栈指针 esp 为基址，偏移 4 字节(esp+4)的内存地址
     movl 4(%esp), %eax          # eax points to from
+    // 以 eax 作为基址，偏移 0 的内存地址
     // 将返回地址出栈，赋值给from->eip
     popl 0(%eax)                # save eip !popl
     movl %esp, 4(%eax)          # save esp::context of from
